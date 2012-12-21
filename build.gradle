@@ -1,4 +1,5 @@
 import groovy.io.FileType
+import org.ajoberstar.gradle.git.tasks.*
 
 /**
  * The flow used in this build script follows that which is
@@ -7,6 +8,7 @@ import groovy.io.FileType
 
 buildscript {
     repositories {
+        mavenCentral()
         maven {
             //Necessary for artifactory plugin
             url 'http://repo.jfrog.org/artifactory/gradle-plugins'
@@ -15,6 +17,8 @@ buildscript {
     dependencies {
         //Necessary for artifactory plugin
         classpath 'org.jfrog.buildinfo:build-info-extractor-gradle:2.0.9'
+        // For the Gradle Git plugin
+        classpath 'org.ajoberstar:gradle-git:0.2.3'
     }
 }
 
@@ -142,21 +146,21 @@ allprojects {
             // Base fetch task
 
             // Found a remote origin
-            project.tasks.add(name: 'fetchOrigin', type: Exec) {
-                commandLine 'git', 'fetch', 'origin'
-                workingDir repoPath
-                description "GIT TASK: fetch from origin"
+            project.tasks.add(name: 'fetchOrigin', type: GitFetch) {
+                remote 'origin'
+                description "Fetch from origin"
                 group 'git'
             }
 
             // Found a remote origin
-            project.tasks.add(name: 'fetchUpstream', type: Exec) {
+            project.tasks.add(name: 'fetchUpstream', type: GitFetch) {
+                remote 'upstream'
                 description "GIT TASK: fetch from upstream"
-                commandLine 'git', 'fetch', 'upstream'
-                workingDir repoPath
                 group 'git'
             }
+
             // Found a remote origin
+            // TODO: Implement this is gradle-git
             project.tasks.add(name: 'pruneUpstream', dependsOn: 'fetchUpstream', type: Exec) {
                 description "GIT TASK: prune upstream"
                 commandLine 'git', 'remote', 'prune', 'upstream'
@@ -165,6 +169,7 @@ allprojects {
             }
 
             // See if remote upstream is already defined
+            // TODO: Implement this in jGit
             if ( !remotes.containsKey('upstream') ) {
                 println "missing upstream from ${project.name}"
                 // Looks like there is no remote upstream.
@@ -172,6 +177,7 @@ allprojects {
                 String protocol = getRemoteProtocol(remotes.origin)
                 String remoteRepo = getRemoteRepository(remotes.origin)
                 String upstreamUrl = "${upstreamBaseUrl[protocol]}${remoteRepo}"
+                // TODO: Implement this in gradle-git
                 project.tasks.add(name: 'createUpstream', type: Exec) {
                     commandLine 'git', 'remote', 'add', 'upstream', upstreamUrl
                     workingDir repoPath
@@ -206,6 +212,7 @@ allprojects {
             }
             if (localBranchesToDelete) {
                 List<String> deleteLocalCommand = [ 'git', 'branch', '-D' ] + localBranchesToDelete.collect{ it.name }
+                // TODO: implement this in gradle-git
                 project.tasks.add(name:'deleteLocalPrunedBranches', dependsOn: 'pruneUpstream', type: Exec) {
                     description "GIT TASK: Deletes local branches that don't start with the word 'feature' and are not in upstream."
                     group 'git'
@@ -216,6 +223,7 @@ allprojects {
                 project.tasks['deletePrunedBranches'].dependsOn << project.tasks['deleteLocalPrunedBranches']
             }
             if (remoteBranchesToDelete) {
+                // TODO: implement this in gradle-git
                 List<String> deleteRemoteCommand = [ 'git', 'push', 'origin', '--delete' ] + remoteBranchesToDelete.collect{ it.name }
                 project.tasks.add(name:'deleteOriginPrunedBranches', dependsOn: 'pruneUpstream', type: Exec) {
                     description "GIT TASK: Deletes origin branches that don't start with the word 'feature' and are not in upstream."
@@ -233,31 +241,24 @@ allprojects {
             if ( hasUpstreamDevelop(branches) ) {
 
                 // Merge in upstream develop with current branch
-                project.tasks.add(name: 'mergeUpstreamDevelopToCurrent', dependsOn: 'fetchAll', type: Exec) {
-                    commandLine 'git', 'merge', 'upstream/develop'
-                    workingDir repoPath
+                project.tasks.add(name: 'mergeUpstreamDevelopToCurrent', dependsOn: 'fetchAll', type: GitMerge) {
+                    ref = 'upstream/develop'
                     description "GIT TASK: merge upstream develop"
                     group 'git'
-                    doLast {
-                        println ":${project.name} merging upstream/develop into current branch."
-                    }
                 }
 
                 // Push current branch to upstream
-                project.tasks.add(name: 'pushOrigin', dependsOn: 'mergeUpstreamDevelopToCurrent', type: Exec) {
-                    commandLine 'git', 'push', 'origin'
-                    workingDir repoPath
+                project.tasks.add(name: 'pushOrigin', dependsOn: 'mergeUpstreamDevelopToCurrent', type: GitPush) {
+                    remote = 'origin'
                     description "GIT TASK: push origin"
                     group 'git'
-                    doLast {
-                        println ":${project.name} pushing synchronized develop branch to upstream/develop."
-                    }
                 }
                 project.tasks['sync'].dependsOn << 'pushOrigin'
 
                 Boolean shouldStash = needToStash(repoFilePath)
                 if (shouldStash) {
 
+                    // TODO : implement in gradle-git
                     project.tasks.add(name: 'stash', type: Exec) {
                         commandLine 'git', 'stash'
                         workingDir repoPath
@@ -269,6 +270,7 @@ allprojects {
                     }
                     project.tasks['mergeUpstreamDevelopToCurrent'].dependsOn = [ 'stash' ]
 
+                    // TODO : implement in gradle-git
                     project.tasks.add(name: 'unstash', type: Exec) {
                         commandLine 'git', 'stash', 'apply'
                         workingDir repoPath
@@ -288,6 +290,7 @@ allprojects {
 
                 if (activeBranch != 'develop') {
                     // Merge in upstream develop with current branch
+                    // TODO : implement in gradle-git
                     project.tasks.add(name: 'checkoutDevelop', dependsOn: 'mergeUpstreamDevelopToCurrent', type: Exec) {
                         commandLine 'git', 'checkout', 'develop'
                         workingDir repoPath
@@ -295,17 +298,14 @@ allprojects {
                         group 'git'
                     }
 
-                    project.tasks.add(name: 'mergeUpstreamDevelopToDevelop', dependsOn: 'checkoutDevelop', type: Exec) {
-                        commandLine 'git', 'merge', 'upstream/develop'
-                        workingDir repoPath
+                    project.tasks.add(name: 'mergeUpstreamDevelopToDevelop', dependsOn: 'checkoutDevelop', type: GitMerge) {
+                        ref 'upstream/develop'
                         description "GIT TASK: merge upstream develop"
                         group 'git'
-                        doLast {
-                            println ":${project.name} merging upstream/develop into develop branch."
-                        }
                     }
                     project.tasks['pushOrigin'].dependsOn = [ 'mergeUpstreamDevelopToDevelop' ]
 
+                    // TODO : implement in gradle-git
                     project.tasks.add(name: 'checkoutActive', dependsOn: 'mergeUpstreamDevelopToDevelop', type: Exec) {
                         commandLine 'git', 'checkout', activeBranch
                         workingDir repoPath
@@ -333,6 +333,7 @@ static String toSnakeCase( String text ) {
 
 static Map<String, String> gitRemotes(File repoFilePath) {
     Map<String, String> remotes = [:]
+    // TODO: implement this in jGit
     def process = "git remote -v".execute([], repoFilePath)
     process.in.eachLine{ line ->
         def remote = line.split()
@@ -361,6 +362,7 @@ static String getRemoteRepository(String remoteUrl) {
 
 static String getActiveBranch(File repoFilePath) {
     String activeBranch = "(no branch)"
+    // TODO: implement this in jGit
     def process = "git branch".execute([], repoFilePath)
     process.in.eachLine{ line ->
         if ( line.startsWith('* ') ) {
@@ -373,6 +375,7 @@ static String getActiveBranch(File repoFilePath) {
 
 static String getRefHash(File repoFilePath) {
     String refHash = ''
+    // TODO: implement this in jGit
     def process = "git log -n 1 --format=%H".execute([], repoFilePath)
     process.in.eachLine{ line ->
         if (line.length() == 40) {
@@ -386,6 +389,7 @@ static String getRefHash(File repoFilePath) {
 static List<GitBranch> getRemoteBranches(File repoFilePath) {
     List<GitBranch> branches = []
 
+    // TODO: implement this in jGit
     def process = "git branch -a".execute([], repoFilePath)
     process.in.eachLine{ line ->
         String fullBranchName = line[2..-1]
@@ -411,6 +415,7 @@ static Boolean hasUpstreamDevelop(List<GitBranch> branches) {
 
 static Boolean needToStash(File repoFilePath) {
     Boolean shouldStash = false
+    // TODO: implement this in jGit
     def process = "git status -s".execute([], repoFilePath)
     process.in.eachLine{ line ->
         if ( !line.startsWith('?? ') ) {
@@ -441,6 +446,7 @@ void buildGradleProperties(File baseFolder, String fileName) {
 void deleteBranches(List<GitBranch> branchesToDeletek, File repoFilePath) {
     branchesToDelete.each{
         String command = 'git branch -D'nn
+    // TODO: implement this in jGit
     def process = "git status -s".execute([], repoFilePath)
     process.in.eachLine{ line ->
         if ( !line.startsWith('?? ') ) {
