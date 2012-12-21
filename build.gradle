@@ -1,0 +1,454 @@
+import groovy.io.FileType
+
+/**
+ * The flow used in this build script follows that which is
+ * outlined at: https://help.github.com/articles/syncing-a-fork
+ */
+
+buildscript {
+    repositories {
+        maven {
+            //Necessary for artifactory plugin
+            url 'http://repo.jfrog.org/artifactory/gradle-plugins'
+        }
+    }
+    dependencies {
+        //Necessary for artifactory plugin
+        classpath 'org.jfrog.buildinfo:build-info-extractor-gradle:2.0.9'
+    }
+}
+
+subprojects.each{ project ->
+    if (project.name == 'lib_common') {
+        project.apply(plugin: 'artifactory')
+        project.artifactory {
+            contextUrl = "${project.artifactory_contextUrl}"   //The base Artifactory URL if not overridden by the publisher/resolver
+        }
+    }
+}
+
+ext.upstreamBaseUrl = [
+    https: 'https://github.com/bloomhealth/',
+    ssh:  'git@github.com:bloomhealth/'
+]
+
+defaultTasks 'buildSettingsGradle', 'sync'
+
+task verifyGradleProperties() {
+
+    String gradlePropertiesFilePath = "${projectDir}/gradle.properties"
+    File gradlePropertiesFile = new File(gradlePropertiesFilePath)
+
+    outputs.files files(gradlePropertiesFilePath)
+    if (! gradlePropertiesFile.exists() ) {
+
+        buildGradleProperties projectDir, gradlePropertiesFilePath
+    }
+}
+
+task sync << {
+    'Synchronize git repositories.'
+}
+
+task buildSettingsGradle(dependsOn: 'verifyGradleProperties') {
+
+    outputs.files files("settings.gradle")
+    description "Build settings.gradle based on gradle.properties file."
+
+    doLast {
+        File settingsGradleFile = new File('settings.gradle')
+
+        def gitProjectInfo = [:]
+        def gitRepos = []
+
+        try {
+            gitRepos = project.syncGitRepos?.split(',')
+        //} catch (org.gradle.api.tasks.TaskExecutionException ex) {
+        } catch (groovy.lang.MissingPropertyException ex) {
+            println ""
+            println ""
+            println "The file 'gradle.properties' was missing."
+            println "It has been automatically created for you."
+            println ""
+            println "PLEASE VERIFY THE CONTENTS OF THIS FILE TO ENSURE IT CONTAINS THE LIST OF REPOSITORIES YOU WANT TO SYNCHRONIZE."
+            println ""
+            throw new FileNotFoundException()
+        }
+
+        // Setup each git repo name/path
+        gitRepos.each { path ->
+            File repoFilePath = new File(path)
+            String repoPath = repoFilePath.absolutePath
+            if (repoPath.endsWith('/.') ) { repoPath = repoPath[0..-3] }
+
+            String repoName = repoFilePath.name
+            if (repoName == '.') {
+                repoName = repoPath.replaceFirst(/.*\\//, '')
+            }
+
+            gitProjectInfo[repoName] = repoPath
+        }
+
+        if ( !settingsGradleFile.exists() && gitProjectInfo ) {
+            String projectNames = gitProjectInfo.keySet().join("', '")
+            settingsGradleFile.withWriter { writer ->
+                writer.writeLine "include '${projectNames}'\n"
+                gitProjectInfo.each{ projectName, projectPath ->
+                    writer.writeLine "project(':${projectName}').projectDir = new File('${projectPath}')"
+                }
+            }
+        }
+    }
+}
+
+// Build Git Tasks for each Repo
+allprojects {
+
+    repositories { mavenCentral() }
+
+    afterEvaluate { project ->
+
+
+        // Setup git repo name/path
+        File repoFilePath = project.projectDir
+        String repoPath = repoFilePath.absolutePath
+        if (repoPath.endsWith('/.') ) { repoPath = repoPath[0..-3] }
+
+        // Build Project
+        println "Building tasks for project: ${project.name}"
+
+        // The main 'sync' task.
+        project.tasks.add(name: 'sync',overwrite: true) {
+            description "Sychronize all Git repositories"
+            group 'Main'
+            doLast {
+                println "Synchronizing ${project.name}"
+            }
+        }
+
+        // Syncing depends on fetching all remote info
+        project.tasks.add(name:'fetchAll') {
+            description "Fetch from all remotes"
+            group 'git'
+        }
+        project.tasks['sync'].dependsOn 'fetchAll'
+
+        Map<String, String> remotes = gitRemotes(repoFilePath)
+        if ( remotes.containsKey('origin') ) {
+            // Base fetch task
+
+            // Found a remote origin
+            project.tasks.add(name: 'fetchOrigin', type: Exec) {
+                commandLine 'git', 'fetch', 'origin'
+                workingDir repoPath
+                description "GIT TASK: fetch from origin"
+                group 'git'
+            }
+
+            // Found a remote origin
+            project.tasks.add(name: 'fetchUpstream', type: Exec) {
+                description "GIT TASK: fetch from upstream"
+                commandLine 'git', 'fetch', 'upstream'
+                workingDir repoPath
+                group 'git'
+            }
+            // Found a remote origin
+            project.tasks.add(name: 'pruneUpstream', dependsOn: 'fetchUpstream', type: Exec) {
+                description "GIT TASK: prune upstream"
+                commandLine 'git', 'remote', 'prune', 'upstream'
+                workingDir repoPath
+                group 'git'
+            }
+
+            // See if remote upstream is already defined
+            if ( !remotes.containsKey('upstream') ) {
+                println "missing upstream from ${project.name}"
+                // Looks like there is no remote upstream.
+                // Pulling from upstream depends on the existence of an upstream!
+                String protocol = getRemoteProtocol(remotes.origin)
+                String remoteRepo = getRemoteRepository(remotes.origin)
+                String upstreamUrl = "${upstreamBaseUrl[protocol]}${remoteRepo}"
+                project.tasks.add(name: 'createUpstream', type: Exec) {
+                    commandLine 'git', 'remote', 'add', 'upstream', upstreamUrl
+                    workingDir repoPath
+                    description "GIT TASK: create new upstream $upstreamUrl"
+                    group 'git'
+                }
+                project.tasks['fetchUpstream'].dependsOn 'createUpstream'
+            }
+
+            // Set fetch dependencies
+            project.tasks['fetchAll'].dependsOn 'fetchOrigin', 'fetchUpstream', 'pruneUpstream'
+
+
+            // Check for prunable branches
+            // Get the list of all branches
+            List<GitBranch> allBranches = getRemoteBranches(repoFilePath)
+            // Find the upstream branches
+            List<GitBranch> upstreamBranches = allBranches.findAll{ it.remote && it.remoteName == 'upstream' }
+            List<String> upstreamBranchNames = upstreamBranches.collect{ it.name }
+            // Find the local and origin branches to delete
+            List<GitBranch> localBranchesToDelete = allBranches.findAll{
+                    !it.remote && !it.name.startsWith('feature/') && !upstreamBranchNames.contains(it.name)
+            }
+            List<GitBranch> remoteBranchesToDelete = allBranches.findAll{
+                    it.remote && it.remoteName == 'origin' && !it.name.startsWith('feature/') && !upstreamBranchNames.contains(it.name)
+            }
+            if (localBranchesToDelete || remoteBranchesToDelete) {
+                project.tasks.add(name:'deletePrunedBranches', dependsOn: 'fetchAll') {
+                    description "GIT TASK: Deletes local and origin branches that don't start with the word 'feature' and are not in upstream."
+                    group 'git'
+                }
+            }
+            if (localBranchesToDelete) {
+                List<String> deleteLocalCommand = [ 'git', 'branch', '-D' ] + localBranchesToDelete.collect{ it.name }
+                project.tasks.add(name:'deleteLocalPrunedBranches', dependsOn: 'pruneUpstream', type: Exec) {
+                    description "GIT TASK: Deletes local branches that don't start with the word 'feature' and are not in upstream."
+                    group 'git'
+
+                    commandLine deleteLocalCommand
+                    workingDir repoPath
+                }
+                project.tasks['deletePrunedBranches'].dependsOn << project.tasks['deleteLocalPrunedBranches']
+            }
+            if (remoteBranchesToDelete) {
+                List<String> deleteRemoteCommand = [ 'git', 'push', 'origin', '--delete' ] + remoteBranchesToDelete.collect{ it.name }
+                project.tasks.add(name:'deleteOriginPrunedBranches', dependsOn: 'pruneUpstream', type: Exec) {
+                    description "GIT TASK: Deletes origin branches that don't start with the word 'feature' and are not in upstream."
+                    group 'git'
+
+                    commandLine deleteRemoteCommand
+                    workingDir repoPath
+                }
+                project.tasks['deletePrunedBranches'].dependsOn << project.tasks['deleteOriginPrunedBranches']
+            }
+
+
+            // No need to merge if there is no upstream/develop branch
+            List<GitBranch> branches = getRemoteBranches(repoFilePath)
+            if ( hasUpstreamDevelop(branches) ) {
+
+                // Merge in upstream develop with current branch
+                project.tasks.add(name: 'mergeUpstreamDevelopToCurrent', dependsOn: 'fetchAll', type: Exec) {
+                    commandLine 'git', 'merge', 'upstream/develop'
+                    workingDir repoPath
+                    description "GIT TASK: merge upstream develop"
+                    group 'git'
+                    doLast {
+                        println ":${project.name} merging upstream/develop into current branch."
+                    }
+                }
+
+                // Push current branch to upstream
+                project.tasks.add(name: 'pushOrigin', dependsOn: 'mergeUpstreamDevelopToCurrent', type: Exec) {
+                    commandLine 'git', 'push', 'origin'
+                    workingDir repoPath
+                    description "GIT TASK: push origin"
+                    group 'git'
+                    doLast {
+                        println ":${project.name} pushing synchronized develop branch to upstream/develop."
+                    }
+                }
+                project.tasks['sync'].dependsOn << 'pushOrigin'
+
+                Boolean shouldStash = needToStash(repoFilePath)
+                if (shouldStash) {
+
+                    project.tasks.add(name: 'stash', type: Exec) {
+                        commandLine 'git', 'stash'
+                        workingDir repoPath
+                        description "GIT TASK: stash changes"
+                        group 'git'
+                        doFirst {
+                            println "Stashing current changes. [git stash]"
+                        }
+                    }
+                    project.tasks['mergeUpstreamDevelopToCurrent'].dependsOn = [ 'stash' ]
+
+                    project.tasks.add(name: 'unstash', type: Exec) {
+                        commandLine 'git', 'stash', 'apply'
+                        workingDir repoPath
+                        description "GIT TASK: unstash changes"
+                        group 'git'
+                        doLast {
+                            println "Un-stashed changes. [git stash apply]"
+                        }
+                    }
+                    project.tasks['sync'].dependsOn << 'unstash'
+                }
+
+                String activeBranch = getActiveBranch(repoFilePath)
+                if (activeBranch == '(no branch)') {
+                    activeBranch = getRefHash(repoFilePath)
+                }
+
+                if (activeBranch != 'develop') {
+                    // Merge in upstream develop with current branch
+                    project.tasks.add(name: 'checkoutDevelop', dependsOn: 'mergeUpstreamDevelopToCurrent', type: Exec) {
+                        commandLine 'git', 'checkout', 'develop'
+                        workingDir repoPath
+                        description "GIT TASK: checkout develop branch"
+                        group 'git'
+                    }
+
+                    project.tasks.add(name: 'mergeUpstreamDevelopToDevelop', dependsOn: 'checkoutDevelop', type: Exec) {
+                        commandLine 'git', 'merge', 'upstream/develop'
+                        workingDir repoPath
+                        description "GIT TASK: merge upstream develop"
+                        group 'git'
+                        doLast {
+                            println ":${project.name} merging upstream/develop into develop branch."
+                        }
+                    }
+                    project.tasks['pushOrigin'].dependsOn = [ 'mergeUpstreamDevelopToDevelop' ]
+
+                    project.tasks.add(name: 'checkoutActive', dependsOn: 'mergeUpstreamDevelopToDevelop', type: Exec) {
+                        commandLine 'git', 'checkout', activeBranch
+                        workingDir repoPath
+                        description "GIT TASK: checkout develop branch"
+                        group 'git'
+                    }
+                    if (shouldStash) {
+                        project.tasks['unstash'].dependsOn << 'checkoutActive'
+                    }
+                }
+            }
+        }
+    }
+}
+
+static String toCamelCase( String text, boolean capitalized = false ) {
+    text = text.replaceAll( "(_)([A-Za-z0-9])", { Object[] it -> it[2].toUpperCase() } )
+    return capitalized ? capitalize(text) : text
+}
+
+static String toSnakeCase( String text ) {
+    text.replaceAll( /([A-Z])/, /_$1/ ).toLowerCase().replaceAll( /^_/, '' )
+}
+
+
+static Map<String, String> gitRemotes(File repoFilePath) {
+    Map<String, String> remotes = [:]
+    def process = "git remote -v".execute([], repoFilePath)
+    process.in.eachLine{ line ->
+        def remote = line.split()
+        if (remote.size() == 3) {
+            String alias = remote[0]
+            String url = remote[1]
+            remotes[alias] = url
+        }
+    }
+    remotes
+}
+
+static String getRemoteProtocol(String remoteUrl) {
+    if ( remoteUrl =~ /^https:/ ) {
+            "https"
+    } else if ( remoteUrl =~ /^git@github.com:/ ) {
+            "ssh"
+    } else {
+            "UNKNOWN"
+    }
+}
+
+static String getRemoteRepository(String remoteUrl) {
+    remoteUrl.replaceFirst(/.*\\//, '')
+}
+
+static String getActiveBranch(File repoFilePath) {
+    String activeBranch = "(no branch)"
+    def process = "git branch".execute([], repoFilePath)
+    process.in.eachLine{ line ->
+        if ( line.startsWith('* ') ) {
+            activeBranch = line.replaceFirst('\\* ','')
+        }
+    }
+
+    activeBranch
+}
+
+static String getRefHash(File repoFilePath) {
+    String refHash = ''
+    def process = "git log -n 1 --format=%H".execute([], repoFilePath)
+    process.in.eachLine{ line ->
+        if (line.length() == 40) {
+            refHash = line
+        }
+    }
+    refHash
+}
+
+
+static List<GitBranch> getRemoteBranches(File repoFilePath) {
+    List<GitBranch> branches = []
+
+    def process = "git branch -a".execute([], repoFilePath)
+    process.in.eachLine{ line ->
+        String fullBranchName = line[2..-1]
+        if ( fullBranchName =~ /HEAD/) {
+            // ignore
+        } else if ( fullBranchName.startsWith('remotes/') ) {
+            // Remote branch
+            def branchComponenets = fullBranchName.split('/')
+            String remoteName = branchComponenets[1]
+            String branchName = branchComponenets[2..-1].join('/')
+            branches << new GitBranch(remote: true, remoteName: remoteName, name: branchName)
+        } else {
+            branches << new GitBranch(name: fullBranchName)
+        }
+    }
+    branches
+}
+
+static Boolean hasUpstreamDevelop(List<GitBranch> branches) {
+    branches.any{ it.remote && it.name == 'develop' && it.remoteName == 'upstream' }
+}
+
+
+static Boolean needToStash(File repoFilePath) {
+    Boolean shouldStash = false
+    def process = "git status -s".execute([], repoFilePath)
+    process.in.eachLine{ line ->
+        if ( !line.startsWith('?? ') ) {
+            shouldStash = true
+        }
+    }
+    shouldStash
+}
+
+void buildGradleProperties(File baseFolder, String fileName) {
+    def gitRepos = []
+    File parentFolder = new File(baseFolder.absolutePath, "..")
+    parentFolder.traverse(type: FileType.DIRECTORIES, nameFilter: ~/\.git/, maxDepth: 10) { gitFolder ->
+        File gitRepo = new File(gitFolder.absolutePath, "..")
+        if (gitRepo.canonicalPath != baseFolder.canonicalPath) {
+            gitRepos << gitRepo.canonicalPath
+        }
+    }
+
+    if (gitRepos) {
+        File gradlePropertiesFile = new File(fileName)
+        gradlePropertiesFile.withWriter{ writer ->
+            writer.writeLine "syncGitRepos=${gitRepos.join(',')}"
+        }
+    }
+}
+
+void deleteBranches(List<GitBranch> branchesToDeletek, File repoFilePath) {
+    branchesToDelete.each{
+        String command = 'git branch -D'nn
+    def process = "git status -s".execute([], repoFilePath)
+    process.in.eachLine{ line ->
+        if ( !line.startsWith('?? ') ) {
+            shouldStash = true
+        }
+    }
+    }
+}
+
+class GitBranch {
+    Boolean remote = false
+    String remoteName = ''
+    String name
+}
+
