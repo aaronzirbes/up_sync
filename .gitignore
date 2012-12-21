@@ -1,4 +1,4 @@
-.swp
+*.swp
 .gradle/
 gradle.properties
 settings.gradle
