@@ -34,6 +34,10 @@ ext.upstreamBaseUrl = [
 
 defaultTasks 'buildSettingsGradle', 'sync'
 
+task wrapper(type: Wrapper) {
+    gradleVersion = '1.3'
+}
+
 task verifyGradleProperties() {
 
     String gradlePropertiesFilePath = "${projectDir}/gradle.properties"
