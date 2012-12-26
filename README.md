@@ -16,18 +16,18 @@ Initialization
 
 This will initialize your `gradle.properties` and `settings.gradle` files.
 
-    gradlew buildSettingsGradle
+    ./gradlew buildSettingsGradle
 
 
 Synchronization
 
 This will synchronize your local and origin repositories with upstream, and merge upstream/develop with your local develop and active branches
 
-    gradlew sync
+    ./gradlew sync
 
 Pruning
 
 This will delete branches from your origin and local repository that are not feature branches (start with 'feature/') and do not live in upstream
 
-    gradlew deletePrunedBranches
+    ./gradlew deletePrunedBranches
 
