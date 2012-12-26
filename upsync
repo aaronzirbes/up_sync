@@ -1,0 +1,15 @@
+#!/bin/bash
+
+install_dir=`dirname $0`
+pushd "${install_dir}" > /dev/null
+
+echo "Launching Graphical client..."
+echo ""
+echo "DO NOT CLOSE THIS WINDOW UNTIL YOU ARE DONE SYNCHRONIZING YOUR PROJECTS"
+
+./gradlew --gui
+
+echo "DONE!"
+echo "You may now close this window."
+
+popd > /dev/null
